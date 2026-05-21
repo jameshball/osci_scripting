@@ -2,7 +2,7 @@
 
 #include <osci_render_core/osci_render_core.h>
 
-#include "../modulation/osci_LuaEffectState.h"
+#include "osci_LuaEffectState.h"
 
 class CustomEffect : public osci::EffectApplication {
 public:

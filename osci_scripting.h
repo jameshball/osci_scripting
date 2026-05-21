@@ -35,9 +35,7 @@
 #include <juce_core/juce_core.h>
 #include <osci_render_core/osci_render_core.h>
 
-#if OSCI_SCRIPTING_ENABLE_LUA
 #include "lua/osci_LuaLibrary.h"
 #include "lua/osci_LuaParser.h"
-#include "modulation/osci_LuaEffectState.h"
+#include "effects/osci_LuaEffectState.h"
 #include "effects/osci_CustomEffect.h"
-#endif
