@@ -117,8 +117,8 @@ LuaScriptEditorComponent::LuaScriptEditorComponent(LuaScriptEditorModel& modelTo
     setOpaque(false);
     setInterceptsMouseClicks(true, true);
 
-    juce::CodeTokeniser* tokeniser = nullptr;
-    if (options.useLuaTokeniser) {
+    juce::CodeTokeniser* tokeniser = options.externalTokeniser;
+    if (tokeniser == nullptr && options.useLuaTokeniser) {
         luaTokeniser = std::make_unique<juce::LuaTokeniser>();
         tokeniser = luaTokeniser.get();
     }
@@ -149,6 +149,16 @@ LuaScriptEditorComponent::LuaScriptEditorComponent(LuaScriptEditorModel& modelTo
     helpButton.setTooltip("Lua scripting reference");
     resetButton.setTooltip("Reset Lua state");
 
+    if (options.helpButtonSvg.isNotEmpty()) {
+        helpButton.setSvgSources(options.helpButtonSvg);
+    }
+    if (options.resetButtonSvg.isNotEmpty()) {
+        resetButton.setSvgSources(options.resetButtonSvg);
+    }
+    if (options.legacyGroupChrome) {
+        setColour(osci::groupComponentBackgroundColourId, osci::Colours::veryDark());
+    }
+
     consoleButton.setToggleState(consoleOpen, juce::dontSendNotification);
     pauseConsoleButton.setClickingTogglesState(true);
 
@@ -166,6 +176,32 @@ LuaScriptEditorComponent::~LuaScriptEditorComponent() {
 }
 
 void LuaScriptEditorComponent::paint(juce::Graphics& g) {
+    if (options.legacyGroupChrome) {
+        const auto bounds = getLocalBounds().toFloat();
+        const auto corner = 5.0f;
+        const auto alpha = isEnabled() ? 1.0f : 0.5f;
+
+        g.setColour(findColour(osci::groupComponentBackgroundColourId).withMultipliedAlpha(alpha));
+        g.fillRoundedRectangle(bounds, corner);
+
+        auto header = bounds;
+        header.setHeight(30.0f);
+        g.setColour(findColour(osci::groupComponentHeaderColourId).withMultipliedAlpha(alpha));
+        g.fillRoundedRectangle(header, corner);
+
+        if (options.showTitle) {
+            g.setColour(findColour(juce::GroupComponent::textColourId).withMultipliedAlpha(alpha));
+            g.setFont(juce::Font(juce::FontOptions(15.0f, juce::Font::plain)));
+            osci::LookAndFeelHelpers::drawFittedText(g,
+                                                     model.getDisplayName(),
+                                                     header.reduced(38.0f, 0.0f).withY(header.getY() + 7.0f).withHeight(15.0f),
+                                                     juce::Justification::centred,
+                                                     1);
+        }
+
+        return;
+    }
+
     const auto bounds = getLocalBounds().toFloat();
     const auto corner = options.compact ? 6.0f : 8.0f;
 
@@ -190,6 +226,11 @@ void LuaScriptEditorComponent::paint(juce::Graphics& g) {
 }
 
 void LuaScriptEditorComponent::resized() {
+    if (options.legacyGroupChrome) {
+        resizedLegacyGroupChrome();
+        return;
+    }
+
     auto bounds = getLocalBounds().reduced(1);
 
     const auto headerHeight = options.showTitle ? (options.compact ? 24 : 30) : 23;
@@ -344,11 +385,16 @@ void LuaScriptEditorComponent::buttonClicked(juce::Button* button) {
 void LuaScriptEditorComponent::updateTheme() {
     if (editor != nullptr) {
         editor->setColourScheme(osci::LookAndFeel::getDefaultColourScheme());
-        editor->setColour(juce::CodeEditorComponent::backgroundColourId, osci::Colours::codeBackground());
-        editor->setColour(juce::CodeEditorComponent::defaultTextColourId, osci::Colours::codeForeground());
-        editor->setColour(juce::CodeEditorComponent::lineNumberBackgroundId, osci::Colours::surfaceSunken());
-        editor->setColour(juce::CodeEditorComponent::lineNumberTextId, osci::Colours::textSubtle());
-        editor->setColour(juce::CodeEditorComponent::highlightColourId, osci::Colours::codeSelection());
+        editor->setColour(juce::CodeEditorComponent::backgroundColourId, options.legacyGroupChrome ? osci::Colours::darker()
+                                                                                                    : osci::Colours::codeBackground());
+        editor->setColour(juce::CodeEditorComponent::defaultTextColourId, options.legacyGroupChrome ? osci::Colours::text()
+                                                                                                     : osci::Colours::codeForeground());
+        editor->setColour(juce::CodeEditorComponent::lineNumberBackgroundId, options.legacyGroupChrome ? osci::Colours::veryDark()
+                                                                                                        : osci::Colours::surfaceSunken());
+        editor->setColour(juce::CodeEditorComponent::lineNumberTextId, options.legacyGroupChrome ? osci::Colours::text()
+                                                                                                  : osci::Colours::textSubtle());
+        editor->setColour(juce::CodeEditorComponent::highlightColourId, options.legacyGroupChrome ? osci::Colours::grey()
+                                                                                                   : osci::Colours::codeSelection());
     }
 
     consoleEditor.setColour(juce::CodeEditorComponent::backgroundColourId, osci::Colours::surfaceSunken());
@@ -359,9 +405,11 @@ void LuaScriptEditorComponent::updateTheme() {
     consoleButton.setColours(osci::Colours::textSubtle(), osci::Colours::accentColor());
     clearConsoleButton.setColours(osci::Colours::danger(), osci::Colours::danger());
     pauseConsoleButton.setColours(osci::Colours::textSubtle(), osci::Colours::accentColor());
-    expandButton.setColours(osci::Colours::textSubtle(), osci::Colours::text());
-    helpButton.setColours(osci::Colours::textSubtle(), osci::Colours::text());
-    resetButton.setColours(osci::Colours::textSubtle(), osci::Colours::text());
+    const auto buttonColour = options.buttonColour.getAlpha() == 0 ? osci::Colours::textSubtle() : options.buttonColour;
+    const auto buttonOnColour = options.buttonOnColour.getAlpha() == 0 ? osci::Colours::text() : options.buttonOnColour;
+    expandButton.setColours(buttonColour, buttonOnColour);
+    helpButton.setColours(buttonColour, buttonOnColour);
+    resetButton.setColours(buttonColour, buttonOnColour);
 }
 
 void LuaScriptEditorComponent::updateConsoleDocument() {
@@ -379,6 +427,36 @@ void LuaScriptEditorComponent::updateConsoleDocument() {
     consoleDocument.clearUndoHistory();
     consoleEditor.moveCaretToEnd(false);
     consoleEditor.scrollDown();
+}
+
+void LuaScriptEditorComponent::resizedLegacyGroupChrome() {
+    auto bounds = getLocalBounds();
+    auto headerArea = bounds.removeFromTop(30);
+
+    resetButton.setVisible(options.showResetButton);
+    helpButton.setVisible(options.showHelpButton);
+    expandButton.setVisible(options.showExpandButton);
+    consoleButton.setVisible(false);
+    clearConsoleButton.setVisible(false);
+    pauseConsoleButton.setVisible(false);
+
+    if (options.showResetButton) {
+        resetButton.setBounds(headerArea.removeFromLeft(30).reduced(5));
+    }
+    if (options.showExpandButton) {
+        expandButton.setBounds(headerArea.removeFromRight(30).reduced(5));
+    }
+    if (options.showHelpButton) {
+        helpButton.setBounds(headerArea.removeFromRight(30).reduced(5));
+    }
+
+    bounds.removeFromBottom(5);
+    if (editor != nullptr) {
+        editor->setBounds(bounds);
+    }
+
+    consoleEditor.setVisible(false);
+    emptyConsoleLabel.setVisible(false);
 }
 
 juce::Rectangle<int> LuaScriptEditorComponent::getHeaderBounds() const {

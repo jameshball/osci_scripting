@@ -5,6 +5,8 @@
 // On all platforms, this should be done automatically when you run the export.
 // If not, use the luajit_win.bat or luajit_linux_macos.sh scripts in the git root from the dev environment.
 #include <lua.hpp>
+#include <algorithm>
+#include <cctype>
 #include <cstring>
 
 std::function<void(const std::string&)> LuaParser::onPrint;
@@ -20,6 +22,60 @@ LuaParser* getParserForState(lua_State* L) {
     auto* parser = static_cast<LuaParser*>(lua_touserdata(L, -1));
     lua_pop(L, 1);
     return parser;
+}
+
+bool isIgnoredSliderNilError(const std::string& error) {
+    if (error.find("attempt to") == std::string::npos || error.find("nil value") == std::string::npos) {
+        return false;
+    }
+
+    auto sliderStart = error.find("'slider_");
+    if (sliderStart == std::string::npos) {
+        return false;
+    }
+
+    const auto suffixStart = sliderStart + std::strlen("'slider_");
+    return suffixStart < error.size() && std::isalpha(static_cast<unsigned char>(error[suffixStart]));
+}
+
+void removeNewlines(std::string& text) {
+    text.erase(std::remove_if(text.begin(), text.end(), [](char c) {
+        return c == '\n' || c == '\r';
+    }), text.end());
+}
+
+void removeLuaStringPrefix(std::string& error) {
+    static constexpr char prefix[] = "[string \"";
+    if (error.rfind(prefix, 0) != 0) {
+        return;
+    }
+
+    auto end = error.find("\"]:");
+    if (end != std::string::npos) {
+        error.erase(0, end + 3);
+    }
+}
+
+int removeLeadingLineNumber(std::string& error) {
+    int line = 0;
+    size_t index = 0;
+
+    while (index < error.size() && std::isdigit(static_cast<unsigned char>(error[index]))) {
+        line = line * 10 + (error[index] - '0');
+        ++index;
+    }
+
+    if (index == 0 || index >= error.size() || error[index] != ':') {
+        return -1;
+    }
+
+    ++index;
+    if (index < error.size() && error[index] == ' ') {
+        ++index;
+    }
+
+    error.erase(0, index);
+    return line;
 }
 } // namespace
 
@@ -71,25 +127,16 @@ LuaDiagnostic LuaParser::parseErrorMessage(const char* errorChars) {
     }
 
     std::string error = errorChars;
-    std::regex nilRegex = std::regex(R"(attempt to.*nil value.*'slider_\w')");
     // ignore nil errors about global variables, these are likely caused by other errors
-    if (std::regex_search(error, nilRegex)) {
+    if (isIgnoredSliderNilError(error)) {
         return {};
     }
 
-    // remove any newlines from error message
-    error = std::regex_replace(error, std::regex(R"(\n|\r)"), "");
-    // remove script content from error message
-    error = std::regex_replace(error, std::regex(R"(^\[string ".*"\]:)"), "");
-    // extract line number from start of error message
-    std::regex lineRegex(R"(^(\d+): )");
-    std::smatch lineMatch;
-    std::regex_search(error, lineMatch, lineRegex);
+    removeNewlines(error);
+    removeLuaStringPrefix(error);
 
-    if (lineMatch.size() > 1) {
-        int line = std::stoi(lineMatch[1]);
-        // remove line number from error message
-        error = std::regex_replace(error, lineRegex, "");
+    auto line = removeLeadingLineNumber(error);
+    if (line >= 0) {
         return { line, juce::String(error) };
     }
 

@@ -15,6 +15,12 @@ public:
         bool showResetButton = false;
         bool consoleInitiallyOpen = false;
         bool compact = false;
+        bool legacyGroupChrome = false;
+        juce::CodeTokeniser* externalTokeniser = nullptr;
+        juce::String helpButtonSvg;
+        juce::String resetButtonSvg;
+        juce::Colour buttonColour;
+        juce::Colour buttonOnColour;
     };
 
     explicit LuaScriptEditorComponent(LuaScriptEditorModel& model);
@@ -45,6 +51,7 @@ private:
     void buttonClicked(juce::Button* button) override;
     void updateTheme();
     void updateConsoleDocument();
+    void resizedLegacyGroupChrome();
     juce::Rectangle<int> getHeaderBounds() const;
     juce::Rectangle<int> getControlsBounds() const;
     juce::Rectangle<int> getConsoleBounds(juce::Rectangle<int> bounds) const;
