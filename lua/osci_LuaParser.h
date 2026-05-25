@@ -17,6 +17,23 @@ public:
 	virtual juce::String getId() = 0;
 };
 
+class LuaConsoleListener {
+public:
+	virtual ~LuaConsoleListener() = default;
+
+	virtual void luaConsolePrinted(const std::string& text) = 0;
+	virtual void luaConsoleCleared() = 0;
+};
+
+struct LuaDiagnostic {
+	int lineNumber = -1;
+	juce::String message;
+
+	bool hasError() const {
+		return lineNumber >= 0 && message.isNotEmpty();
+	}
+};
+
 const int NUM_SLIDERS = 26;
 
 const char SLIDER_NAMES[NUM_SLIDERS][9] = {
@@ -146,15 +163,21 @@ public:
 	void close(lua_State*& L);
 	void forgetAllStates() { resetRequested.store(true, std::memory_order_release); }
 	std::function<void(int, juce::String, juce::String)> getErrorCallback() const { return errorCallback; }
+	void setConsoleCallbacks(std::function<void(const std::string&)> printCallback, std::function<void()> clearCallback);
 
 	static std::function<void(const std::string&)> onPrint;
 	static std::function<void()> onClear;
+	static void emitPrint(lua_State* L, const std::string& text);
+	static void emitClear(lua_State* L);
+	static LuaDiagnostic validateScript(const juce::String& script);
 
 private:
 	static void maximumInstructionsReached(lua_State* L, lua_Debug* D);
-	
+	static LuaDiagnostic parseErrorMessage(const char* error);
+
 	void reset(lua_State*& L, juce::String script);
 	void reportError(const char* error);
+	void bindParserToState(lua_State* L);
 	void parse(lua_State*& L);
 	void setGlobalVariable(lua_State*& L, const char* name, double value);
 	void setGlobalVariable(lua_State*& L, const char* name, int value);
@@ -177,4 +200,6 @@ private:
 	lua_State* lastSeenState = nullptr;
 	uint64_t usedVarMask = ~uint64_t(0);
 	std::atomic<bool> resetRequested{false};
+	std::function<void(const std::string&)> consolePrintCallback;
+	std::function<void()> consoleClearCallback;
 };

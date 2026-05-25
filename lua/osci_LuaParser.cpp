@@ -10,6 +10,19 @@
 std::function<void(const std::string&)> LuaParser::onPrint;
 std::function<void()> LuaParser::onClear;
 
+namespace
+{
+const char parserRegistryKey = 0;
+
+LuaParser* getParserForState(lua_State* L) {
+    lua_pushlightuserdata(L, const_cast<char*>(&parserRegistryKey));
+    lua_gettable(L, LUA_REGISTRYINDEX);
+    auto* parser = static_cast<LuaParser*>(lua_touserdata(L, -1));
+    lua_pop(L, 1);
+    return parser;
+}
+} // namespace
+
 void LuaParser::maximumInstructionsReached(lua_State* L, lua_Debug* D) {
     lua_getstack(L, 1, D);
     lua_getinfo(L, "l", D);
@@ -29,6 +42,11 @@ LuaParser::LuaParser(juce::String fileName, juce::String script, std::function<v
     seenStates.reserve(32);
 }
 
+void LuaParser::setConsoleCallbacks(std::function<void(const std::string&)> printCallback, std::function<void()> clearCallback) {
+    consolePrintCallback = std::move(printCallback);
+    consoleClearCallback = std::move(clearCallback);
+}
+
 void LuaParser::reset(lua_State*& L, juce::String script) {
     functionRef = -1;
 
@@ -41,17 +59,22 @@ void LuaParser::reset(lua_State*& L, juce::String script) {
     L = luaL_newstate();
     luaL_openlibs(L);
 	luaopen_oscilibrary(L);
+    bindParserToState(L);
     
     this->script = script;
     parse(L);
 }
 
-void LuaParser::reportError(const char* errorChars) {
+LuaDiagnostic LuaParser::parseErrorMessage(const char* errorChars) {
+    if (errorChars == nullptr) {
+        return {};
+    }
+
     std::string error = errorChars;
     std::regex nilRegex = std::regex(R"(attempt to.*nil value.*'slider_\w')");
     // ignore nil errors about global variables, these are likely caused by other errors
     if (std::regex_search(error, nilRegex)) {
-        return;
+        return {};
     }
 
     // remove any newlines from error message
@@ -67,8 +90,47 @@ void LuaParser::reportError(const char* errorChars) {
         int line = std::stoi(lineMatch[1]);
         // remove line number from error message
         error = std::regex_replace(error, lineRegex, "");
-        errorCallback(line, fileName, error);
+        return { line, juce::String(error) };
     }
+
+    if (!error.empty()) {
+        return { 1, juce::String(error) };
+    }
+
+    return {};
+}
+
+LuaDiagnostic LuaParser::validateScript(const juce::String& scriptToValidate) {
+    lua_State* validationState = luaL_newstate();
+    if (validationState == nullptr) {
+        return { 1, "Unable to create Lua validation state" };
+    }
+
+    const int ret = luaL_loadstring(validationState, scriptToValidate.toUTF8());
+    LuaDiagnostic diagnostic;
+
+    if (ret != 0) {
+        diagnostic = parseErrorMessage(lua_tostring(validationState, -1));
+        lua_pop(validationState, 1);
+    } else {
+        lua_pop(validationState, 1);
+    }
+
+    lua_close(validationState);
+    return diagnostic;
+}
+
+void LuaParser::reportError(const char* errorChars) {
+    auto diagnostic = parseErrorMessage(errorChars);
+    if (diagnostic.hasError()) {
+        errorCallback(diagnostic.lineNumber, fileName, diagnostic.message);
+    }
+}
+
+void LuaParser::bindParserToState(lua_State* L) {
+    lua_pushlightuserdata(L, const_cast<char*>(&parserRegistryKey));
+    lua_pushlightuserdata(L, this);
+    lua_settable(L, LUA_REGISTRYINDEX);
 }
 
 void LuaParser::parse(lua_State*& L) {
@@ -292,5 +354,32 @@ void LuaParser::close(lua_State*& L) {
         seenStates.erase(std::remove(seenStates.begin(), seenStates.end(), L), seenStates.end());
         if (lastSeenState == L) lastSeenState = nullptr;
         lua_close(L);
+        L = nullptr;
+    }
+}
+
+void LuaParser::emitPrint(lua_State* L, const std::string& text) {
+    if (auto* parser = getParserForState(L)) {
+        if (parser->consolePrintCallback) {
+            parser->consolePrintCallback(text);
+            return;
+        }
+    }
+
+    if (onPrint) {
+        onPrint(text);
+    }
+}
+
+void LuaParser::emitClear(lua_State* L) {
+    if (auto* parser = getParserForState(L)) {
+        if (parser->consoleClearCallback) {
+            parser->consoleClearCallback();
+            return;
+        }
+    }
+
+    if (onClear) {
+        onClear();
     }
 }

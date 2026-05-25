@@ -558,14 +558,14 @@ static int luaPrint(lua_State* L) {
     int nargs = lua_gettop(L);
 
     for (int i = 1; i <= nargs; ++i) {
-        LuaParser::onPrint(luaValueToString(L, i));
+        LuaParser::emitPrint(L, luaValueToString(L, i));
     }
 
     return 0;
 }
 
 static int luaClear(lua_State* L) {
-    LuaParser::onClear();
+    LuaParser::emitClear(L);
     return 0;
 }
 

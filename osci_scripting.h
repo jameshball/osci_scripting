@@ -26,16 +26,21 @@
   license:           GPLv3
   minimumCppStandard: 20
 
-  dependencies:      juce_core, osci_render_core
+  dependencies:      juce_core, juce_gui_basics, juce_gui_extra, osci_render_core, osci_gui
 
  END_JUCE_MODULE_DECLARATION
 
 *******************************************************************************/
 
 #include <juce_core/juce_core.h>
+#include <juce_gui_basics/juce_gui_basics.h>
+#include <juce_gui_extra/juce_gui_extra.h>
 #include <osci_render_core/osci_render_core.h>
+#include <osci_gui/osci_gui.h>
 
 #include "lua/osci_LuaLibrary.h"
 #include "lua/osci_LuaParser.h"
 #include "effects/osci_LuaEffectState.h"
 #include "effects/osci_CustomEffect.h"
+#include "gui/osci_LuaScriptEditorModel.h"
+#include "gui/osci_LuaScriptEditorComponent.h"
