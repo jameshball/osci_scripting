@@ -43,4 +43,5 @@
 #include "effects/osci_LuaEffectState.h"
 #include "effects/osci_CustomEffect.h"
 #include "gui/osci_LuaScriptEditorModel.h"
+#include "gui/osci_LuaConsoleComponent.h"
 #include "gui/osci_LuaScriptEditorComponent.h"
