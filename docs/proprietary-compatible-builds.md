@@ -12,6 +12,6 @@ Scripting should remain optional at the module/product level because it adds a r
 
 ## Dependencies
 
-LuaJIT is permissively licensed, but consumers must provide compatible LuaJIT headers/libraries and keep the required LuaJIT notice with any distributed binaries or source.
+LuaJIT is permissively licensed and is provided as a nested `third_party/LuaJIT` submodule. Consumers must initialise that submodule or provide compatible LuaJIT headers/libraries, and keep the required LuaJIT notice with any distributed binaries or source.
 
 If scripting is omitted by a product, no code outside this module should require LuaJIT headers.
