@@ -31,6 +31,7 @@ public:
 
     void paint(juce::Graphics& g) override;
     void resized() override;
+    void parentHierarchyChanged() override;
     void lookAndFeelChanged() override;
 
 private:
