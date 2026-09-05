@@ -15,6 +15,18 @@ std::function<void()> LuaParser::onClear;
 namespace
 {
 const char parserRegistryKey = 0;
+std::atomic<uint64_t> nextStateGeneration { 1 };
+
+void closeState(lua_State*& L) {
+    if (L != nullptr) {
+        // Finalizers may print after their parser/editor has been destroyed.
+        lua_pushlightuserdata(L, const_cast<char*>(&parserRegistryKey));
+        lua_pushnil(L);
+        lua_settable(L, LUA_REGISTRYINDEX);
+        lua_close(L);
+        L = nullptr;
+    }
+}
 
 LuaParser* getParserForState(lua_State* L) {
     lua_pushlightuserdata(L, const_cast<char*>(&parserRegistryKey));
@@ -79,6 +91,19 @@ int removeLeadingLineNumber(std::string& error) {
 }
 } // namespace
 
+LuaState::~LuaState() {
+    reset();
+}
+
+void LuaState::reset() {
+    closeState(state);
+    generation = 0;
+}
+
+void LuaParser::forgetAllStates() {
+    generation.store(nextStateGeneration.fetch_add(1, std::memory_order_relaxed), std::memory_order_release);
+}
+
 void LuaParser::maximumInstructionsReached(lua_State* L, lua_Debug* D) {
     lua_getstack(L, 1, D);
     lua_getinfo(L, "l", D);
@@ -92,11 +117,7 @@ void LuaParser::setMaximumInstructions(lua_State*& L, int count) {
     lua_sethook(L, LuaParser::maximumInstructionsReached, LUA_MASKCOUNT, count);
 }
 
-LuaParser::LuaParser(juce::String fileName, juce::String script, std::function<void(int, juce::String, juce::String)> errorCallback, juce::String fallbackScript) : script(script), fallbackScript(fallbackScript), errorCallback(errorCallback), fileName(fileName) {
-    // Pre-allocate to avoid audio-thread heap allocation when voices first call run().
-    // 32 covers 16 ShapeVoice + 16 CustomEffect lua_State pointers.
-    seenStates.reserve(32);
-}
+LuaParser::LuaParser(juce::String fileName, juce::String script, std::function<void(int, juce::String, juce::String)> errorCallback, juce::String fallbackScript) : script(script), fallbackScript(fallbackScript), errorCallback(errorCallback), fileName(fileName), generation(nextStateGeneration.fetch_add(1, std::memory_order_relaxed)) {}
 
 void LuaParser::setConsoleCallbacks(std::function<void(const std::string&)> printCallback, std::function<void()> clearCallback) {
     consolePrintCallback = std::move(printCallback);
@@ -106,11 +127,7 @@ void LuaParser::setConsoleCallbacks(std::function<void(const std::string&)> prin
 void LuaParser::reset(lua_State*& L, juce::String script) {
     functionRef = -1;
 
-    if (L != nullptr) {
-        seenStates.erase(std::remove(seenStates.begin(), seenStates.end(), L), seenStates.end());
-        if (lastSeenState == L) lastSeenState = nullptr;
-        lua_close(L);
-    }
+    closeState(L);
     
     L = luaL_newstate();
     luaL_openlibs(L);
@@ -314,8 +331,6 @@ void LuaParser::revertToFallback(lua_State*& L) {
     usingFallbackScript = true;
     if (script != fallbackScript) {
         reset(L, fallbackScript);
-        seenStates.push_back(L);
-        lastSeenState = L;
     }
 }
 
@@ -331,21 +346,12 @@ void LuaParser::readTable(lua_State*& L, LuaResult& result) {
 }
 
 // only the audio thread runs this fuction
-LuaResult LuaParser::run(lua_State*& L, LuaVariables& vars) {
-    // Check if a reset was requested from the UI thread
-    if (resetRequested.load(std::memory_order_acquire)) {
-        resetRequested.store(false, std::memory_order_relaxed);
-        seenStates.clear();
-        lastSeenState = nullptr;
-    }
-
-    // if we haven't seen this state before, reset it
-    if (L == nullptr || L != lastSeenState) {
-        if (std::find(seenStates.begin(), seenStates.end(), L) == seenStates.end()) {
-            reset(L, script);
-            seenStates.push_back(L);
-        }
-        lastSeenState = L;
+LuaResult LuaParser::run(LuaState& state, LuaVariables& vars) {
+    const auto currentGeneration = generation.load(std::memory_order_acquire);
+    auto& L = state.state;
+    if (L == nullptr || state.generation != currentGeneration) {
+        reset(L, script);
+        state.generation = currentGeneration;
     }
 
     LuaResult result;
@@ -396,21 +402,14 @@ void LuaParser::resetErrors() {
     errorCallback(-1, fileName, "");
 }
 
-void LuaParser::close(lua_State*& L) {
-    if (L != nullptr) {
-        seenStates.erase(std::remove(seenStates.begin(), seenStates.end(), L), seenStates.end());
-        if (lastSeenState == L) lastSeenState = nullptr;
-        lua_close(L);
-        L = nullptr;
-    }
-}
-
 void LuaParser::emitPrint(lua_State* L, const std::string& text) {
-    if (auto* parser = getParserForState(L)) {
-        if (parser->consolePrintCallback) {
-            parser->consolePrintCallback(text);
-            return;
-        }
+    auto* parser = getParserForState(L);
+    if (parser == nullptr) {
+        return;
+    }
+    if (parser->consolePrintCallback) {
+        parser->consolePrintCallback(text);
+        return;
     }
 
     if (onPrint) {
@@ -419,11 +418,13 @@ void LuaParser::emitPrint(lua_State* L, const std::string& text) {
 }
 
 void LuaParser::emitClear(lua_State* L) {
-    if (auto* parser = getParserForState(L)) {
-        if (parser->consoleClearCallback) {
-            parser->consoleClearCallback();
-            return;
-        }
+    auto* parser = getParserForState(L);
+    if (parser == nullptr) {
+        return;
+    }
+    if (parser->consoleClearCallback) {
+        parser->consoleClearCallback();
+        return;
     }
 
     if (onClear) {

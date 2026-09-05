@@ -150,17 +150,30 @@ struct LuaResult {
 };
 
 struct lua_State;
+
+class LuaState {
+public:
+    LuaState() = default;
+    ~LuaState();
+    LuaState(const LuaState&) = delete;
+    LuaState& operator=(const LuaState&) = delete;
+    void reset();
+
+private:
+    friend class LuaParser;
+    lua_State* state = nullptr;
+    uint64_t generation = 0;
+};
 struct lua_Debug;
 class LuaParser {
 public:
 	LuaParser(juce::String fileName, juce::String script, std::function<void(int, juce::String, juce::String)> errorCallback, juce::String fallbackScript = "return { 0.0, 0.0 }");
 
-	LuaResult run(lua_State*& L, LuaVariables& vars);
+	LuaResult run(LuaState& state, LuaVariables& vars);
 	bool isFunctionValid();
 	juce::String getScript();
 	void resetErrors();
-	void close(lua_State*& L);
-	void forgetAllStates() { resetRequested.store(true, std::memory_order_release); }
+	void forgetAllStates();
 	std::function<void(int, juce::String, juce::String)> getErrorCallback() const { return errorCallback; }
 	void setConsoleCallbacks(std::function<void(const std::string&)> printCallback, std::function<void()> clearCallback);
 
@@ -195,10 +208,8 @@ private:
 	juce::String fallbackScript;
 	std::function<void(int, juce::String, juce::String)> errorCallback;
 	juce::String fileName;
-	std::vector<lua_State*> seenStates;
-	lua_State* lastSeenState = nullptr;
+	std::atomic<uint64_t> generation;
 	uint64_t usedVarMask = ~uint64_t(0);
-	std::atomic<bool> resetRequested{false};
 	std::function<void(const std::string&)> consolePrintCallback;
 	std::function<void()> consoleClearCallback;
 };
