@@ -7,13 +7,6 @@ CustomEffect::CustomEffect(LuaEffectState& luaState, const std::vector<std::shar
 	vars.isEffect = true;
 }
 
-CustomEffect::~CustomEffect() {
-	juce::SpinLock::ScopedLockType lock(luaState.codeLock);
-	if (luaState.parser) {
-		luaState.parser->close(L);
-	}
-}
-
 osci::Point CustomEffect::apply(int index, osci::Point input, osci::Point externalInput, const std::vector<std::atomic<float>>& values, float sampleRate, float frequency) {
 	if (!luaState.parser) {
 		return input;

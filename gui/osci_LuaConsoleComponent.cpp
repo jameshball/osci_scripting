@@ -141,6 +141,10 @@ void LuaConsoleComponent::resized() {
     pauseConsoleButton.setBounds(topBar.removeFromRight(options.headerHeight).withSizeKeepingCentre(20, 20));
 }
 
+void LuaConsoleComponent::parentHierarchyChanged() {
+    updateColours();
+}
+
 void LuaConsoleComponent::lookAndFeelChanged() {
     updateColours();
 }
@@ -170,7 +174,13 @@ void LuaConsoleComponent::timerCallback() {
 }
 
 void LuaConsoleComponent::updateColours() {
-    console.setColour(juce::CodeEditorComponent::backgroundColourId, findColour(osci::groupComponentBackgroundColourId, true));
+    const auto backgroundId = osci::groupComponentBackgroundColourId;
+    bool hasBackground = getLookAndFeel().isColourSpecified(backgroundId);
+    for (juce::Component* component = this; component != nullptr; component = component->getParentComponent()) {
+        hasBackground = hasBackground || component->isColourSpecified(backgroundId);
+    }
+    console.setColour(juce::CodeEditorComponent::backgroundColourId,
+                      hasBackground ? findColour(backgroundId, true) : osci::Colours::darker());
     console.setColour(juce::CodeEditorComponent::defaultTextColourId, findColour(juce::CodeEditorComponent::defaultTextColourId, true));
     console.setColour(juce::CodeEditorComponent::highlightColourId, findColour(juce::CodeEditorComponent::highlightColourId, true));
     emptyConsoleLabel.setColour(juce::Label::textColourId, findColour(juce::GroupComponent::textColourId, true).withMultipliedAlpha(0.8f));
