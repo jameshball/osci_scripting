@@ -2,6 +2,9 @@
 
 #include <atomic>
 #include <functional>
+#include <optional>
+#include <cstddef>
+#include <cstdint>
 #include <numbers>
 #include <string>
 #include <vector>
@@ -163,10 +166,33 @@ private:
     friend class LuaParser;
     lua_State* state = nullptr;
     uint64_t generation = 0;
+    using Allocator = void* (*)(void*, void*, std::size_t, std::size_t);
+    Allocator originalAllocator = nullptr;
+    void* originalAllocatorData = nullptr;
+    std::size_t memoryUsed = 0, memoryLimit = 0;
+    uint64_t instructionsRemaining = 0;
+    int hookInterval = 256;
+    const std::atomic<bool>* cancellation = nullptr;
+    bool offlineFailed = false, memoryExceeded = false;
 };
 struct lua_Debug;
 class LuaParser {
 public:
+    // Opt-in, worker-only policy. Configure before running a fresh per-worker
+    // LuaState; the cancellation flag must outlive all runs using this parser.
+    // Bounds Lua-requested heap bytes (plus a fixed native VM bootstrap), not
+    // allocator arena overhead. Hooks interrupt Lua bytecode, not long native
+    // library calls. Random numbers have a fixed seed; unordered table traversal
+    // and address-derived strings are not cross-VM reproducibility guarantees.
+    // Errors are terminal for that state: no fallback script is substituted.
+    struct OfflinePolicy {
+        uint64_t instructionBudget = 100000;
+        std::size_t memoryLimitBytes = 16 * 1024 * 1024;
+        uint32_t randomSeed = 0;
+        const std::atomic<bool>* cancelled = nullptr;
+    };
+    juce::Result setOfflinePolicy(OfflinePolicy policy);
+
 	LuaParser(juce::String fileName, juce::String script, std::function<void(int, juce::String, juce::String)> errorCallback, juce::String fallbackScript = "return { 0.0, 0.0 }");
 
 	LuaResult run(LuaState& state, LuaVariables& vars);
@@ -184,6 +210,13 @@ public:
 	static LuaDiagnostic validateScript(const juce::String& script);
 
 private:
+    struct OfflineRunContext;
+    LuaResult runOffline(LuaState& state, LuaVariables& vars);
+    static int initialiseOffline(lua_State* L);
+    static int executeOffline(lua_State* L);
+    static void offlineHook(lua_State* L, lua_Debug* D);
+    static void* offlineAllocator(void* context, void* pointer, std::size_t oldSize, std::size_t newSize);
+    std::optional<OfflinePolicy> offlinePolicy;
 	static void maximumInstructionsReached(lua_State* L, lua_Debug* D);
 	static LuaDiagnostic parseErrorMessage(const char* error);
 

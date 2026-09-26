@@ -5,8 +5,11 @@
 // On all platforms, this should be done automatically when you run the export.
 // If not, use the luajit_win.bat or luajit_linux_macos.sh scripts in the git root from the dev environment.
 #include <lua.hpp>
+#include <luajit.h>
+#include <limits>
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstring>
 
 std::function<void(const std::string&)> LuaParser::onPrint;
@@ -73,7 +76,9 @@ int removeLeadingLineNumber(std::string& error) {
     size_t index = 0;
 
     while (index < error.size() && std::isdigit(static_cast<unsigned char>(error[index]))) {
-        line = line * 10 + (error[index] - '0');
+        const auto digit = error[index] - '0';
+        line = line > (std::numeric_limits<int>::max() - digit) / 10
+            ? std::numeric_limits<int>::max() : line * 10 + digit;
         ++index;
     }
 
@@ -96,8 +101,207 @@ LuaState::~LuaState() {
 }
 
 void LuaState::reset() {
+    if (state != nullptr && originalAllocator != nullptr) {
+        lua_sethook(state, nullptr, 0, 0);
+        // LuaJIT recognises its allocator here to destroy the entire arena.
+        lua_setallocf(state, originalAllocator, originalAllocatorData);
+    }
     closeState(state);
     generation = 0;
+    originalAllocator = nullptr;
+    originalAllocatorData = nullptr;
+    memoryUsed = memoryLimit = 0;
+    offlineFailed = memoryExceeded = false;
+}
+
+struct LuaParser::OfflineRunContext {
+    LuaParser* parser;
+    LuaState* state;
+    LuaVariables* variables;
+    LuaResult* result;
+};
+
+juce::Result LuaParser::setOfflinePolicy(OfflinePolicy policy) {
+    if (policy.instructionBudget == 0 || policy.memoryLimitBytes < 64 * 1024
+        || policy.memoryLimitBytes > 256 * 1024 * 1024) {
+        return juce::Result::fail("Offline Lua requires a positive instruction budget and a memory limit between 64 KiB and 256 MiB.");
+    }
+    offlinePolicy = policy;
+    functionRef = -1;
+    usingFallbackScript = false;
+    forgetAllStates();
+    return juce::Result::ok();
+}
+
+void* LuaParser::offlineAllocator(void* context, void* pointer, std::size_t oldSize, std::size_t newSize) {
+    auto& state = *static_cast<LuaState*>(context);
+    const auto previous = pointer == nullptr ? std::size_t(0) : oldSize;
+    if (newSize > previous && (state.memoryUsed > state.memoryLimit || newSize - previous > state.memoryLimit - state.memoryUsed)) {
+        state.memoryExceeded = true;
+        return nullptr;
+    }
+    auto* result = state.originalAllocator(state.originalAllocatorData, pointer, oldSize, newSize);
+    if (result != nullptr || newSize == 0) {
+        if (newSize >= previous) { state.memoryUsed += newSize - previous; }
+        else { state.memoryUsed -= std::min(state.memoryUsed, previous - newSize); }
+    }
+    return result;
+}
+
+void LuaParser::offlineHook(lua_State* L, lua_Debug*) {
+    void* context = nullptr;
+    lua_getallocf(L, &context);
+    auto& state = *static_cast<LuaState*>(context);
+    if (state.cancellation != nullptr && state.cancellation->load(std::memory_order_relaxed)) {
+        state.offlineFailed = true;
+        luaL_error(L, "Offline Lua cancelled.");
+        return;
+    }
+    if (state.instructionsRemaining <= static_cast<uint64_t>(state.hookInterval)) {
+        state.offlineFailed = true;
+        luaL_error(L, "Offline Lua instruction budget exceeded.");
+        return;
+    }
+    state.instructionsRemaining -= static_cast<uint64_t>(state.hookInterval);
+    const auto next = static_cast<int>(std::min<uint64_t>(state.instructionsRemaining, 256));
+    if (next != state.hookInterval) {
+        state.hookInterval = next;
+        lua_sethook(L, offlineHook, LUA_MASKCOUNT, next);
+    }
+}
+
+int LuaParser::initialiseOffline(lua_State* L) {
+    auto& context = *static_cast<OfflineRunContext*>(lua_touserdata(L, 1));
+    auto& parser = *context.parser;
+    luaL_openlibs(L);
+    luaopen_oscilibrary(L);
+    luaJIT_setmode(L, 0, LUAJIT_MODE_ENGINE | LUAJIT_MODE_OFF);
+    parser.bindParserToState(L);
+    lua_getglobal(L, "math");
+    lua_getfield(L, -1, "randomseed");
+    lua_pushnumber(L, static_cast<double>(parser.offlinePolicy->randomSeed));
+    lua_call(L, 1, 0);
+    lua_pop(L, 1);
+    // Protected calls/coroutines could otherwise swallow or evade the budget
+    // error. Finalizers and console callbacks could execute outside the guarded
+    // per-sample call, so these are intentionally unavailable offline too.
+    const char* denied[] = { "io", "os", "package", "debug", "ffi", "jit", "require", "module", "dofile", "loadfile",
+        "load", "loadstring", "coroutine", "pcall", "xpcall", "newproxy", "collectgarbage", "gcinfo",
+        "getfenv", "setfenv", "print", "clear" };
+    for (const auto* name : denied) {
+        lua_pushnil(L);
+        lua_setglobal(L, name);
+    }
+    const auto* text = parser.script.toRawUTF8();
+    if (static_cast<unsigned char>(text[0]) == 0x1b) {
+        return luaL_error(L, "Offline Lua accepts text source only.");
+    }
+    if (luaL_loadbuffer(L, text, static_cast<std::size_t>(parser.script.getNumBytesAsUTF8()), "offline") != 0) {
+        return lua_error(L);
+    }
+    parser.functionRef = luaL_ref(L, LUA_REGISTRYINDEX);
+    return 0;
+}
+
+int LuaParser::executeOffline(lua_State* L) {
+    auto& context = *static_cast<OfflineRunContext*>(lua_touserdata(L, 1));
+    lua_settop(L, 0);
+    context.parser->setGlobalVariables(L, *context.variables);
+    lua_rawgeti(L, LUA_REGISTRYINDEX, context.parser->functionRef);
+    lua_call(L, 0, LUA_MULTRET);
+    if (lua_gettop(L) != 1 || !lua_istable(L, 1)) {
+        return luaL_error(L, "Offline Lua must return one dense numeric array.");
+    }
+    // Do not use Render's permissive table reader: it coerces strings/booleans
+    // and truncates extra channels. Scan raw keys so sparse or oversized tables
+    // cannot hide extra results behind Lua's undefined length for arrays with holes.
+    unsigned int present = 0;
+    int count = 0;
+    lua_pushnil(L);
+    while (lua_next(L, 1) != 0) {
+        if (lua_type(L, -2) != LUA_TNUMBER) {
+            return luaL_error(L, "Offline Lua results must use consecutive numeric keys starting at 1.");
+        }
+        const auto key = lua_tonumber(L, -2);
+        if (!std::isfinite(key) || key < 1 || key > MAX_LUA_RESULT_VALUES || std::floor(key) != key) {
+            return luaL_error(L, "Offline Lua results must contain at most six consecutive values.");
+        }
+        if (lua_type(L, -1) != LUA_TNUMBER) {
+            return luaL_error(L, "Offline Lua result values must be numbers, not strings, booleans or tables.");
+        }
+        const auto value = lua_tonumber(L, -1);
+        if (!std::isfinite(value) || std::abs(value) > static_cast<double>(std::numeric_limits<float>::max())) {
+            return luaL_error(L, "Offline Lua returned a non-finite or unrepresentable number.");
+        }
+        const auto index = static_cast<int>(key) - 1;
+        context.result->values[index] = static_cast<float>(value);
+        present |= 1u << index;
+        count = std::max(count, index + 1);
+        lua_pop(L, 1);
+    }
+    if (count == 0 || present != (1u << count) - 1u) {
+        return luaL_error(L, "Offline Lua must return a nonempty dense numeric array.");
+    }
+    context.result->count = count;
+    return 0;
+}
+
+LuaResult LuaParser::runOffline(LuaState& state, LuaVariables& vars) {
+    LuaResult result;
+    const auto currentGeneration = generation.load(std::memory_order_acquire);
+    const auto fail = [&](const char* message) {
+        state.offlineFailed = true;
+        functionRef = -1;
+        auto diagnostic = parseErrorMessage(message);
+        if (!diagnostic.hasError()) {
+            diagnostic = { 1, message != nullptr ? juce::String(message) : juce::String("Offline Lua failed.") };
+        }
+        if (errorCallback) { errorCallback(diagnostic.lineNumber, fileName, diagnostic.message); }
+    };
+    if (offlinePolicy->cancelled != nullptr && offlinePolicy->cancelled->load(std::memory_order_relaxed)) {
+        fail("Offline Lua cancelled.");
+        return result;
+    }
+    OfflineRunContext context { this, &state, &vars, &result };
+    if (state.state == nullptr || state.generation != currentGeneration) {
+        state.reset();
+        functionRef = -1;
+        // Keep LuaJIT's native allocator (including its low-address allocator on
+        // non-GC64 platforms), wrapping only after the fixed VM bootstrap.
+        state.state = luaL_newstate();
+        if (state.state == nullptr) {
+            fail("Unable to create offline Lua state.");
+            return result;
+        }
+        state.generation = currentGeneration;
+        state.memoryUsed = static_cast<std::size_t>(lua_gc(state.state, LUA_GCCOUNT, 0)) * 1024
+            + static_cast<std::size_t>(lua_gc(state.state, LUA_GCCOUNTB, 0));
+        state.memoryLimit = offlinePolicy->memoryLimitBytes;
+        state.cancellation = offlinePolicy->cancelled;
+        state.originalAllocator = lua_getallocf(state.state, &state.originalAllocatorData);
+        lua_setallocf(state.state, offlineAllocator, &state);
+        if (state.memoryUsed > state.memoryLimit || lua_cpcall(state.state, initialiseOffline, &context) != 0) {
+            fail(state.memoryUsed > state.memoryLimit ? "Offline Lua memory budget exceeded." : lua_tostring(state.state, -1));
+            lua_settop(state.state, 0);
+            return result;
+        }
+        detectUsedVariables(script);
+    }
+    if (state.offlineFailed) { return result; }
+    state.instructionsRemaining = offlinePolicy->instructionBudget;
+    state.hookInterval = static_cast<int>(std::min<uint64_t>(state.instructionsRemaining, 256));
+    lua_sethook(state.state, offlineHook, LUA_MASKCOUNT, state.hookInterval);
+    const auto status = lua_cpcall(state.state, executeOffline, &context);
+    lua_sethook(state.state, nullptr, 0, 0);
+    if (status != 0 || state.memoryExceeded || state.offlineFailed) {
+        fail(state.memoryExceeded ? "Offline Lua memory budget exceeded." : lua_tostring(state.state, -1));
+        lua_settop(state.state, 0);
+        return {};
+    }
+    lua_settop(state.state, 0);
+    resetErrors();
+    incrementVars(vars);
+    return result;
 }
 
 void LuaParser::forgetAllStates() {
@@ -347,6 +551,8 @@ void LuaParser::readTable(lua_State*& L, LuaResult& result) {
 
 // only the audio thread runs this fuction
 LuaResult LuaParser::run(LuaState& state, LuaVariables& vars) {
+    if (offlinePolicy.has_value()) { return runOffline(state, vars); }
+    if (state.originalAllocator != nullptr) { state.reset(); }
     const auto currentGeneration = generation.load(std::memory_order_acquire);
     auto& L = state.state;
     if (L == nullptr || state.generation != currentGeneration) {
