@@ -212,7 +212,7 @@ int LuaParser::executeOffline(lua_State* L) {
     if (lua_gettop(L) != 1 || !lua_istable(L, 1)) {
         return luaL_error(L, "Offline Lua must return one dense numeric array.");
     }
-    // Do not use Render's permissive table reader: it coerces strings/booleans
+    // Do not use the live parser's permissive table reader: it coerces strings/booleans
     // and truncates extra channels. Scan raw keys so sparse or oversized tables
     // cannot hide extra results behind Lua's undefined length for arrays with holes.
     unsigned int present = 0;
