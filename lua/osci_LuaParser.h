@@ -178,8 +178,9 @@ private:
 struct lua_Debug;
 class LuaParser {
 public:
-    // Opt-in, worker-only policy. Configure before running a fresh per-worker
-    // LuaState; the cancellation flag must outlive all runs using this parser.
+    // Opt-in, worker-only policy. Not thread-safe: set it on the thread that
+    // runs this parser, before its first run, with a fresh per-worker LuaState;
+    // the cancellation flag must outlive all runs using this parser.
     // Bounds Lua-requested heap bytes (plus a fixed native VM bootstrap), not
     // allocator arena overhead. Hooks interrupt Lua bytecode, not long native
     // library calls. Random numbers have a fixed seed; unordered table traversal

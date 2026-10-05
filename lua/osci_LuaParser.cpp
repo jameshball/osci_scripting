@@ -142,8 +142,11 @@ void* LuaParser::offlineAllocator(void* context, void* pointer, std::size_t oldS
     }
     auto* result = state.originalAllocator(state.originalAllocatorData, pointer, oldSize, newSize);
     if (result != nullptr || newSize == 0) {
-        if (newSize >= previous) { state.memoryUsed += newSize - previous; }
-        else { state.memoryUsed -= std::min(state.memoryUsed, previous - newSize); }
+        if (newSize >= previous) {
+            state.memoryUsed += newSize - previous;
+        } else {
+            state.memoryUsed -= std::min(state.memoryUsed, previous - newSize);
+        }
     }
     return result;
 }
