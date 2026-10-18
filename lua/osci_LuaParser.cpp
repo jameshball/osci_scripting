@@ -124,7 +124,7 @@ struct LuaParser::OfflineRunContext {
 juce::Result LuaParser::setOfflinePolicy(OfflinePolicy policy) {
     if (policy.instructionBudget == 0 || policy.memoryLimitBytes < 64 * 1024
         || policy.memoryLimitBytes > 256 * 1024 * 1024) {
-        return juce::Result::fail("Offline Lua requires a positive instruction budget and a memory limit between 64 KiB and 256 MiB.");
+        return juce::Result::fail("A script needs a positive instruction budget and a memory limit between 64 KiB and 256 MiB.");
     }
     offlinePolicy = policy;
     functionRef = -1;
@@ -157,12 +157,12 @@ void LuaParser::offlineHook(lua_State* L, lua_Debug*) {
     auto& state = *static_cast<LuaState*>(context);
     if (state.cancellation != nullptr && state.cancellation->load(std::memory_order_relaxed)) {
         state.offlineFailed = true;
-        luaL_error(L, "Offline Lua cancelled.");
+        luaL_error(L, "The script was cancelled.");
         return;
     }
     if (state.instructionsRemaining <= static_cast<uint64_t>(state.hookInterval)) {
         state.offlineFailed = true;
-        luaL_error(L, "Offline Lua instruction budget exceeded.");
+        luaL_error(L, "The script took too long: check for a loop that never ends.");
         return;
     }
     state.instructionsRemaining -= static_cast<uint64_t>(state.hookInterval);
@@ -197,7 +197,7 @@ int LuaParser::initialiseOffline(lua_State* L) {
     }
     const auto* text = parser.script.toRawUTF8();
     if (static_cast<unsigned char>(text[0]) == 0x1b) {
-        return luaL_error(L, "Offline Lua accepts text source only.");
+        return luaL_error(L, "A script must be text.");
     }
     if (luaL_loadbuffer(L, text, static_cast<std::size_t>(parser.script.getNumBytesAsUTF8()), "offline") != 0) {
         return lua_error(L);
@@ -213,7 +213,7 @@ int LuaParser::executeOffline(lua_State* L) {
     lua_rawgeti(L, LUA_REGISTRYINDEX, context.parser->functionRef);
     lua_call(L, 0, LUA_MULTRET);
     if (lua_gettop(L) != 1 || !lua_istable(L, 1)) {
-        return luaL_error(L, "Offline Lua must return one dense numeric array.");
+        return luaL_error(L, "The script must return a list of numbers, such as {x, y}.");
     }
     // Do not use the live parser's permissive table reader: it coerces strings/booleans
     // and truncates extra channels. Scan raw keys so sparse or oversized tables
@@ -223,18 +223,18 @@ int LuaParser::executeOffline(lua_State* L) {
     lua_pushnil(L);
     while (lua_next(L, 1) != 0) {
         if (lua_type(L, -2) != LUA_TNUMBER) {
-            return luaL_error(L, "Offline Lua results must use consecutive numeric keys starting at 1.");
+            return luaL_error(L, "The script must return a plain list of numbers, such as {x, y}, without names or gaps.");
         }
         const auto key = lua_tonumber(L, -2);
         if (!std::isfinite(key) || key < 1 || key > MAX_LUA_RESULT_VALUES || std::floor(key) != key) {
-            return luaL_error(L, "Offline Lua results must contain at most six consecutive values.");
+            return luaL_error(L, "The script must return at most six numbers: {x, y, z, r, g, b}.");
         }
         if (lua_type(L, -1) != LUA_TNUMBER) {
-            return luaL_error(L, "Offline Lua result values must be numbers, not strings, booleans or tables.");
+            return luaL_error(L, "The script must return numbers, not text, true or false, or tables.");
         }
         const auto value = lua_tonumber(L, -1);
         if (!std::isfinite(value) || std::abs(value) > static_cast<double>(std::numeric_limits<float>::max())) {
-            return luaL_error(L, "Offline Lua returned a non-finite or unrepresentable number.");
+            return luaL_error(L, "The script returned a number that isn't finite (NaN or infinity).");
         }
         const auto index = static_cast<int>(key) - 1;
         context.result->values[index] = static_cast<float>(value);
@@ -243,7 +243,7 @@ int LuaParser::executeOffline(lua_State* L) {
         lua_pop(L, 1);
     }
     if (count == 0 || present != (1u << count) - 1u) {
-        return luaL_error(L, "Offline Lua must return a nonempty dense numeric array.");
+        return luaL_error(L, "The script must return at least one number, such as {x, y}.");
     }
     context.result->count = count;
     return 0;
@@ -262,7 +262,7 @@ LuaResult LuaParser::runOffline(LuaState& state, LuaVariables& vars) {
         if (errorCallback) { errorCallback(diagnostic.lineNumber, fileName, diagnostic.message); }
     };
     if (offlinePolicy->cancelled != nullptr && offlinePolicy->cancelled->load(std::memory_order_relaxed)) {
-        fail("Offline Lua cancelled.");
+        fail("The script was cancelled.");
         return result;
     }
     OfflineRunContext context { this, &state, &vars, &result };
@@ -284,7 +284,7 @@ LuaResult LuaParser::runOffline(LuaState& state, LuaVariables& vars) {
         state.originalAllocator = lua_getallocf(state.state, &state.originalAllocatorData);
         lua_setallocf(state.state, offlineAllocator, &state);
         if (state.memoryUsed > state.memoryLimit || lua_cpcall(state.state, initialiseOffline, &context) != 0) {
-            fail(state.memoryUsed > state.memoryLimit ? "Offline Lua memory budget exceeded." : lua_tostring(state.state, -1));
+            fail(state.memoryUsed > state.memoryLimit ? "The script used too much memory." : lua_tostring(state.state, -1));
             lua_settop(state.state, 0);
             return result;
         }
@@ -297,7 +297,7 @@ LuaResult LuaParser::runOffline(LuaState& state, LuaVariables& vars) {
     const auto status = lua_cpcall(state.state, executeOffline, &context);
     lua_sethook(state.state, nullptr, 0, 0);
     if (status != 0 || state.memoryExceeded || state.offlineFailed) {
-        fail(state.memoryExceeded ? "Offline Lua memory budget exceeded." : lua_tostring(state.state, -1));
+        fail(state.memoryExceeded ? "The script used too much memory." : lua_tostring(state.state, -1));
         lua_settop(state.state, 0);
         return {};
     }
